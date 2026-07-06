@@ -24,14 +24,14 @@ A [Herdr](https://herdr.dev) plugin to create and remove [Jujutsu](https://jj-vc
    [[keys.command]]
    key = "prefix+a"
    type = "plugin_action"
-   command = "nathanflurry.jj-workspace.new"
-   description = "new jj workspace"
+   command = "nathanflurry.jj-workspace.new-tab"
+   description = "new jj workspace (in tab)"
 
    [[keys.command]]
    key = "prefix+shift+a"
    type = "plugin_action"
-   command = "nathanflurry.jj-workspace.new-tab"
-   description = "new jj workspace (in tab)"
+   command = "nathanflurry.jj-workspace.new"
+   description = "new jj workspace"
 
    [[keys.command]]
    key = "prefix+d"
@@ -42,8 +42,8 @@ A [Herdr](https://herdr.dev) plugin to create and remove [Jujutsu](https://jj-vc
 
 ## Quickstart
 
-- `prefix+a` — create a workspace (prompts for a name), open as a new **workspace**
-- `prefix+shift+a` — same, but open in a new **tab**
+- `prefix+a` — create a workspace (prompts for a name), open in a new **tab**
+- `prefix+shift+a` — same, but open as a new **workspace**
 - `prefix+d` — destroy the current workspace
 
 Replaces the manual `new tab → jj workspace add → cd` dance.

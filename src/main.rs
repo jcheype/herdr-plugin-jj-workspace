@@ -111,11 +111,26 @@ fn cmd_wizard() -> ! {
     }
     let dest = dest_path.display().to_string();
 
+    // Fetch so the new workspace starts from the latest origin main, not
+    // whatever the local repo last saw. Non-fatal: offline still works, the
+    // base is just whatever trunk() already points at locally.
+    eprintln!("+ jj git fetch");
+    let mut fetch = Command::new("jj");
+    fetch.current_dir(&repo).args(["git", "fetch"]);
+    if !run(fetch) {
+        eprintln!("warning: jj git fetch failed; basing workspace on the local trunk");
+    }
+
+    // Base the new workspace's working copy on origin's main. trunk() is jj's
+    // builtin alias for main@origin / master@origin. JJ_BASE_REV overrides.
+    let base = config_value("JJ_BASE_REV").unwrap_or_else(|| "trunk()".into());
+
     // jj allows a slash in workspace names, so keep the full `workspace/<name>`
     // for both the workspace and the bookmark.
-    eprintln!("+ jj workspace add --name {branch} {dest}");
+    eprintln!("+ jj workspace add --name {branch} -r {base} {dest}");
     let mut add = Command::new("jj");
-    add.current_dir(&repo).args(["workspace", "add", "--name", &branch, &dest]);
+    add.current_dir(&repo)
+        .args(["workspace", "add", "--name", &branch, "-r", &base, &dest]);
     run_or(add, "jj workspace add", fail);
 
     // Mirror Herdr's worktree branch with a jj bookmark of the same name (non-fatal).
