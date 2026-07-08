@@ -85,6 +85,11 @@ fn cmd_wizard() -> ! {
     if !is_jj_workspace(&repo) {
         fail(&format!("{repo} is not a jj workspace"));
     }
+    // Resolve to the MAIN workspace root. The wizard may be launched from a
+    // secondary workspace (e.g. ~/.herdr/workspaces/agent-os/pkg-perf); without
+    // this, repo_name would be the leaf ("pkg-perf") and new workspaces would be
+    // scattered under workspaces/pkg-perf/ instead of workspaces/agent-os/.
+    let repo = repo_root(&repo);
 
     let repo_name = basename(&repo);
     let root = workspaces_root();
@@ -145,7 +150,36 @@ fn cmd_wizard() -> ! {
     if mode == "tab" {
         eprintln!("+ herdr tab create --cwd {dest}");
         open.args(["tab", "create", "--cwd", &dest, "--label", &branch, "--focus"]);
-        run_or(open, "herdr tab create", fail);
+        let output = match open.output() {
+            Ok(output) => output,
+            Err(err) => fail(&format!("herdr tab create failed to start: {err}")),
+        };
+        io::stderr().write_all(&output.stderr).ok();
+        if !output.status.success() {
+            fail(&format!("herdr tab create failed (exit {})", output.status.code().unwrap_or(-1)));
+        }
+        // When this wizard's overlay pane exits, herdr restores focus to the
+        // tab the overlay was opened from, clobbering --focus. Re-focus the new
+        // tab from a detached helper that outlives the overlay.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(tab_id) = json_string_field(&stdout, "tab_id") {
+            let script = format!(
+                "for _ in 1 2 3 4 5 6; do sleep 0.2; '{herdr}' tab focus '{tab_id}' >/dev/null 2>&1; done"
+            );
+            let mut helper = Command::new("sh");
+            helper
+                .args(["-c", &script])
+                .stdin(process::Stdio::null())
+                .stdout(process::Stdio::null())
+                .stderr(process::Stdio::null());
+            // Detach into its own process group: the wizard's group gets SIGHUP
+            // when the overlay PTY closes, which would kill the helper first.
+            {
+                use std::os::unix::process::CommandExt;
+                helper.process_group(0);
+            }
+            let _ = helper.spawn();
+        }
     } else {
         eprintln!("+ herdr workspace create --cwd {dest}");
         open.args(["workspace", "create", "--cwd", &dest, "--label", &branch, "--focus"]);
@@ -524,6 +558,33 @@ fn plugin_id() -> String {
 
 fn is_jj_workspace(repo: &str) -> bool {
     !repo.is_empty() && Path::new(repo).join(".jj").exists()
+}
+
+/// Resolve any jj workspace path to its MAIN workspace root.
+///
+/// The main workspace stores `.jj/repo` as the store *directory*; a secondary
+/// workspace stores `.jj/repo` as a *file* holding the path to the main store,
+/// relative to `.jj/` (e.g. `../../../../../agent-os/.jj/repo`). Following that
+/// pointer and stripping the trailing `.jj/repo` yields the repo's real root, so
+/// naming + placement stay stable no matter which workspace launched the wizard.
+/// Falls back to the input path if anything is unexpected.
+fn repo_root(workspace: &str) -> String {
+    let jj_dir = Path::new(workspace).join(".jj");
+    let repo_ptr = jj_dir.join("repo");
+    // Main workspace: `.jj/repo` is the store dir itself — already the root.
+    if repo_ptr.is_dir() {
+        return workspace.to_string();
+    }
+    let pointer = match fs::read_to_string(&repo_ptr) {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => return workspace.to_string(),
+    };
+    // Pointer is relative to `.jj/`; drop `repo` then `.jj` to reach the root.
+    let root = jj_dir.join(&pointer).parent().and_then(Path::parent).map(Path::to_path_buf);
+    match root.and_then(|r| fs::canonicalize(r).ok()) {
+        Some(canon) => canon.display().to_string(),
+        None => workspace.to_string(),
+    }
 }
 
 fn valid_branch(branch: &str) -> bool {
