@@ -36,10 +36,15 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("open") => cmd_open(args.get(2).map(String::as_str).unwrap_or("workspace")),
+        Some("open-existing") => cmd_open_existing(),
+        Some("open-picker") => cmd_open_picker(),
         Some("wizard") => cmd_wizard(),
         Some("remove") => cmd_remove(),
+        Some("remove-picker") => cmd_remove_picker(),
         other => {
-            eprintln!("usage: jj-workspace <open [workspace|tab] | wizard | remove>");
+            eprintln!(
+                "usage: jj-workspace <open [workspace|tab] | open-existing | open-picker | wizard | remove | remove-picker>"
+            );
             eprintln!("got: {other:?}");
             process::exit(2);
         }
@@ -55,12 +60,20 @@ fn cmd_open(mode: &str) -> ! {
         .unwrap_or_default();
 
     let mut cmd = Command::new(herdr_bin());
-    cmd.args(["plugin", "pane", "open", "--plugin", &plugin_id(), "--entrypoint", "wizard"])
-        .arg("--env")
-        .arg(format!("JJ_REPO={repo}"))
-        .arg("--env")
-        .arg(format!("JJ_OPEN={mode}"))
-        .arg("--focus");
+    cmd.args([
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        &plugin_id(),
+        "--entrypoint",
+        "wizard",
+    ])
+    .arg("--env")
+    .arg(format!("JJ_REPO={repo}"))
+    .arg("--env")
+    .arg(format!("JJ_OPEN={mode}"))
+    .arg("--focus");
     match cmd.status() {
         Ok(status) => process::exit(status.code().unwrap_or(0)),
         Err(err) => {
@@ -68,6 +81,66 @@ fn cmd_open(mode: &str) -> ! {
             process::exit(1);
         }
     }
+}
+
+fn cmd_open_existing() -> ! {
+    let ctx = env::var("HERDR_PLUGIN_CONTEXT_JSON").unwrap_or_default();
+    let repo = json_string_field(&ctx, "workspace_cwd")
+        .or_else(|| json_string_field(&ctx, "focused_pane_cwd"))
+        .unwrap_or_default();
+
+    let mut cmd = Command::new(herdr_bin());
+    cmd.args([
+        "plugin",
+        "pane",
+        "open",
+        "--plugin",
+        &plugin_id(),
+        "--entrypoint",
+        "open-picker",
+    ])
+    .arg("--env")
+    .arg(format!("JJ_REPO={repo}"))
+    .arg("--focus");
+    match cmd.status() {
+        Ok(status) => process::exit(status.code().unwrap_or(0)),
+        Err(err) => die(&format!("failed to open workspace picker pane: {err}")),
+    }
+}
+
+fn cmd_open_picker() -> ! {
+    if which("jj").is_none() {
+        fail("jj not found on PATH");
+    }
+    let mut repo = env::var("JJ_REPO").unwrap_or_default();
+    if repo.is_empty() || !is_jj_workspace(&repo) {
+        repo = prompt("jj repo path: ");
+    }
+    let repo = repo_root(repo.trim_end_matches('/'));
+    let repo = match fs::canonicalize(&repo) {
+        Ok(p) => p,
+        Err(err) => fail(&format!("cannot resolve {repo}: {err}")),
+    };
+    let workspaces = list_workspaces(&repo, fail);
+    let workspace = match run_workspace_picker(&workspaces, "open jj workspace", "open") {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => process::exit(0),
+        Err(err) => fail(&format!("terminal error: {err}")),
+    };
+    let path = workspace_path(&repo, &workspace);
+    if !path.exists() {
+        fail(&format!(
+            "workspace directory not found: {}",
+            path.display()
+        ));
+    }
+    let cwd = path.display().to_string();
+    let mut open = Command::new(herdr_bin());
+    open.args([
+        "tab", "create", "--cwd", &cwd, "--label", &workspace, "--focus",
+    ]);
+    run_or(open, "herdr tab create", fail);
+    process::exit(0);
 }
 
 /// Pane (interactive TTY): the worktree-style modal, then create + open.
@@ -140,7 +213,9 @@ fn cmd_wizard() -> ! {
 
     // Mirror Herdr's worktree branch with a jj bookmark of the same name (non-fatal).
     let mut bookmark = Command::new("jj");
-    bookmark.current_dir(&dest).args(["bookmark", "create", &branch, "-r", "@"]);
+    bookmark
+        .current_dir(&dest)
+        .args(["bookmark", "create", &branch, "-r", "@"]);
     if !run(bookmark) {
         eprintln!("warning: could not create bookmark {branch} (workspace still created)");
     }
@@ -149,14 +224,19 @@ fn cmd_wizard() -> ! {
     let mut open = Command::new(&herdr);
     if mode == "tab" {
         eprintln!("+ herdr tab create --cwd {dest}");
-        open.args(["tab", "create", "--cwd", &dest, "--label", &branch, "--focus"]);
+        open.args([
+            "tab", "create", "--cwd", &dest, "--label", &branch, "--focus",
+        ]);
         let output = match open.output() {
             Ok(output) => output,
             Err(err) => fail(&format!("herdr tab create failed to start: {err}")),
         };
         io::stderr().write_all(&output.stderr).ok();
         if !output.status.success() {
-            fail(&format!("herdr tab create failed (exit {})", output.status.code().unwrap_or(-1)));
+            fail(&format!(
+                "herdr tab create failed (exit {})",
+                output.status.code().unwrap_or(-1)
+            ));
         }
         // When this wizard's overlay pane exits, herdr restores focus to the
         // tab the overlay was opened from, clobbering --focus. Re-focus the new
@@ -182,13 +262,21 @@ fn cmd_wizard() -> ! {
         }
     } else {
         eprintln!("+ herdr workspace create --cwd {dest}");
-        open.args(["workspace", "create", "--cwd", &dest, "--label", &branch, "--focus"]);
+        open.args([
+            "workspace",
+            "create",
+            "--cwd",
+            &dest,
+            "--label",
+            &branch,
+            "--focus",
+        ]);
         run_or(open, "herdr workspace create", fail);
     }
     process::exit(0);
 }
 
-/// Action (headless): forget the current jj workspace, delete it, close in Herdr.
+/// Action: forget a jj workspace, delete it, close in Herdr.
 fn cmd_remove() -> ! {
     if which("jj").is_none() {
         die("jj not found on PATH");
@@ -210,13 +298,83 @@ fn cmd_remove() -> ! {
     if !canon.join(".jj").exists() {
         die(&format!("{} is not a jj workspace", canon.display()));
     }
-    // The MAIN workspace stores .jj/repo as a directory; a secondary workspace
-    // stores it as a file pointer. Never remove the main workspace.
     if canon.join(".jj").join("repo").is_dir() {
-        die(&format!("refusing to remove the MAIN jj workspace ({})", canon.display()));
+        let mut cmd = Command::new(herdr_bin());
+        cmd.args([
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            &plugin_id(),
+            "--entrypoint",
+            "remove-picker",
+        ])
+        .arg("--env")
+        .arg(format!("JJ_REPO={}", canon.display()))
+        .arg("--focus");
+        match cmd.status() {
+            Ok(status) => process::exit(status.code().unwrap_or(0)),
+            Err(err) => die(&format!("failed to open remove picker pane: {err}")),
+        }
     }
+
+    remove_workspace(canon, ws);
+}
+
+fn cmd_remove_picker() -> ! {
+    if which("jj").is_none() {
+        fail("jj not found on PATH");
+    }
+    let repo = env::var("JJ_REPO").unwrap_or_default();
+    let repo = match fs::canonicalize(&repo) {
+        Ok(p) => p,
+        Err(err) => fail(&format!("cannot resolve {repo}: {err}")),
+    };
+    let workspaces: Vec<String> = list_workspaces(&repo, fail)
+        .into_iter()
+        .filter(|name| name != "default")
+        .collect();
+    if workspaces.is_empty() {
+        fail("no removable jj workspace found");
+    }
+    let workspace = match run_workspace_picker(&workspaces, "remove jj workspace", "remove") {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => process::exit(0),
+        Err(err) => fail(&format!("terminal error: {err}")),
+    };
+    remove_named_workspace(repo, workspace);
+}
+
+fn remove_named_workspace(repo: PathBuf, workspace: String) -> ! {
+    let mut forget = Command::new("jj");
+    forget
+        .current_dir(&repo)
+        .args(["workspace", "forget", &workspace]);
+    run_or(forget, "jj workspace forget", die);
+    let path = workspace_path(&repo, &workspace);
+    if path.exists() {
+        if let Err(err) = fs::remove_dir_all(&path) {
+            die(&format!("failed to delete {}: {err}", path.display()));
+        }
+    } else {
+        eprintln!("warning: workspace directory not found: {}", path.display());
+    }
+    println!("removed jj workspace: {workspace}");
+    process::exit(0);
+}
+
+fn workspace_path(repo: &Path, workspace: &str) -> PathBuf {
+    workspaces_root()
+        .join(basename(&repo.display().to_string()))
+        .join(branch_to_path_slug(workspace))
+}
+
+fn remove_workspace(canon: PathBuf, ws: Option<String>) -> ! {
     if canon == Path::new("/") || canon.parent().is_none() {
-        die(&format!("refusing to remove unsafe path: {}", canon.display()));
+        die(&format!(
+            "refusing to remove unsafe path: {}",
+            canon.display()
+        ));
     }
 
     let mut forget = Command::new("jj");
@@ -237,6 +395,122 @@ fn cmd_remove() -> ! {
     }
     println!("removed jj workspace: {}", canon.display());
     process::exit(0);
+}
+
+fn list_workspaces(repo: &Path, on_err: fn(&str) -> !) -> Vec<String> {
+    let output = match Command::new("jj")
+        .current_dir(repo)
+        .args(["workspace", "list", "--template", "name ++ \"\\n\""])
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => on_err(&format!("jj workspace list failed to start: {err}")),
+    };
+    if !output.status.success() {
+        on_err(&format!(
+            "jj workspace list failed (exit {})",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+
+    let workspaces: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| {
+            line.split_once(':')
+                .map(|(name, _)| name)
+                .unwrap_or(line)
+                .trim()
+                .to_string()
+        })
+        .filter(|name| !name.is_empty())
+        .collect();
+    if workspaces.is_empty() {
+        on_err("no jj workspace found");
+    }
+    workspaces
+}
+
+fn run_workspace_picker(
+    workspaces: &[String],
+    title: &str,
+    action: &str,
+) -> io::Result<Option<String>> {
+    enable_raw_mode()?;
+    let mut out = io::stdout();
+    execute!(out, EnterAlternateScreen)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
+    let mut selected = 0usize;
+
+    let outcome = loop {
+        let _ = terminal
+            .draw(|frame| draw_workspace_picker(frame, workspaces, selected, title, action));
+        match event::read() {
+            Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Esc => break None,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break None,
+                KeyCode::Up => selected = selected.saturating_sub(1),
+                KeyCode::Down => selected = (selected + 1).min(workspaces.len() - 1),
+                KeyCode::Enter => break Some(workspaces[selected].clone()),
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(err) => {
+                let _ = restore_terminal(&mut terminal);
+                return Err(err);
+            }
+        }
+    };
+
+    restore_terminal(&mut terminal)?;
+    Ok(outcome)
+}
+
+fn draw_workspace_picker(
+    frame: &mut Frame,
+    workspaces: &[String],
+    selected: usize,
+    title: &str,
+    action: &str,
+) {
+    let p = catppuccin();
+    let area = frame.area();
+    dim_background(frame, area);
+    let h = (workspaces.len() as u16 + 5).min(18);
+    let Some(inner) = render_modal_shell(frame, area, 78, h, &p) else {
+        return;
+    };
+    if inner.height < 5 {
+        return;
+    }
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas::<3>(inner);
+
+    render_modal_header(frame, rows[0], title, &p);
+    let list_area = rows[1];
+    let visible = list_area.height as usize;
+    let start = selected.saturating_sub(visible.saturating_sub(1));
+    for (line, ws) in workspaces.iter().enumerate().skip(start).take(visible) {
+        let y = list_area.y + (line - start) as u16;
+        let rect = Rect::new(list_area.x, y, list_area.width, 1);
+        let style = if line == selected {
+            Style::default()
+                .fg(panel_contrast_fg(&p))
+                .bg(p.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(p.text)
+        };
+        frame.render_widget(Paragraph::new(format!(" {ws}")).style(style), rect);
+    }
+    frame.render_widget(
+        Paragraph::new(format!(" ↑/↓ select   ↵ {action}   esc cancel"))
+            .style(Style::default().fg(p.subtext0)),
+        rows[2],
+    );
 }
 
 // --- wizard TUI (ported from herdr src/ui/dialogs.rs + widgets.rs) ----------
@@ -353,17 +627,26 @@ fn draw_wizard(frame: &mut Frame, name: &str, repo_name: &str, root: &Path, erro
 
     render_modal_header(frame, rows[0], "new jj workspace", &p);
 
-    frame.render_widget(Paragraph::new(" workspace").style(Style::default().fg(p.overlay0)), rows[1]);
+    frame.render_widget(
+        Paragraph::new(" workspace").style(Style::default().fg(p.overlay0)),
+        rows[1],
+    );
     let input_rect = Rect::new(rows[2].x, rows[2].y, rows[2].width, 1);
     frame.render_widget(Clear, input_rect);
     frame.render_widget(
-        Paragraph::new(format!(" {name}█"))
-            .style(Style::default().fg(p.text).bg(p.surface0)),
+        Paragraph::new(format!(" {name}█")).style(Style::default().fg(p.text).bg(p.surface0)),
         input_rect,
     );
 
-    let checkout = root.join(repo_name).join(branch_to_path_slug(name)).display().to_string();
-    frame.render_widget(Paragraph::new(" checkout").style(Style::default().fg(p.overlay0)), rows[3]);
+    let checkout = root
+        .join(repo_name)
+        .join(branch_to_path_slug(name))
+        .display()
+        .to_string();
+    frame.render_widget(
+        Paragraph::new(" checkout").style(Style::default().fg(p.overlay0)),
+        rows[3],
+    );
     frame.render_widget(
         Paragraph::new(format!(" {checkout}")).style(Style::default().fg(p.subtext0)),
         rows[4],
@@ -450,9 +733,17 @@ fn render_modal_header(frame: &mut Frame, area: Rect, title: &str, p: &Palette) 
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn render_action_button(frame: &mut Frame, rect: Rect, hint: Option<&str>, label: &str, style: Style) {
+fn render_action_button(
+    frame: &mut Frame,
+    rect: Rect,
+    hint: Option<&str>,
+    label: &str,
+    style: Style,
+) {
     frame.render_widget(
-        Paragraph::new(action_button_text(hint, label)).style(style).alignment(Alignment::Center),
+        Paragraph::new(action_button_text(hint, label))
+            .style(style)
+            .alignment(Alignment::Center),
         rect,
     );
 }
@@ -473,7 +764,9 @@ fn panel_contrast_fg(p: &Palette) -> Color {
 
 /// Herdr's `new_linked_worktree_button_rects`: a centered "create / cancel" row.
 fn button_rects(inner: Rect) -> (Rect, Rect) {
-    let create = action_button_text(Some("↵"), "create and open").chars().count() as u16;
+    let create = action_button_text(Some("↵"), "create and open")
+        .chars()
+        .count() as u16;
     let cancel = action_button_text(Some("esc"), "cancel").chars().count() as u16;
     let gap = 2u16;
     let total = create + cancel + gap;
@@ -487,10 +780,12 @@ fn button_rects(inner: Rect) -> (Rect, Rect) {
 
 // --- naming (mirrors src/worktree.rs in herdr) -----------------------------
 
-const ADJECTIVES: [&str; 8] =
-    ["brave", "calm", "clear", "green", "lucky", "quiet", "rapid", "silver"];
-const NOUNS: [&str; 8] =
-    ["river", "cloud", "field", "forest", "harbor", "meadow", "stone", "valley"];
+const ADJECTIVES: [&str; 8] = [
+    "brave", "calm", "clear", "green", "lucky", "quiet", "rapid", "silver",
+];
+const NOUNS: [&str; 8] = [
+    "river", "cloud", "field", "forest", "harbor", "meadow", "stone", "valley",
+];
 
 fn generated_name(seed: u64) -> String {
     let adjective = ADJECTIVES[(seed as usize) % ADJECTIVES.len()];
@@ -531,13 +826,20 @@ fn workspaces_root() -> PathBuf {
     if let Some(root) = config_value("JJ_WORKSPACE_ROOT") {
         return PathBuf::from(root.trim_end_matches('/'));
     }
-    PathBuf::from(shellexpand::full("~/.herdr/workspaces").unwrap_or_else(|_| "~/.herdr/workspaces".into()).into_owned())
+    PathBuf::from(
+        shellexpand::full("~/.herdr/workspaces")
+            .unwrap_or_else(|_| "~/.herdr/workspaces".into())
+            .into_owned(),
+    )
 }
 
 // --- helpers ---------------------------------------------------------------
 
 fn herdr_bin() -> String {
-    env::var("HERDR_BIN_PATH").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "herdr".into())
+    env::var("HERDR_BIN_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "herdr".into())
 }
 
 fn plugin_id() -> String {
@@ -571,7 +873,11 @@ fn repo_root(workspace: &str) -> String {
         Err(_) => return workspace.to_string(),
     };
     // Pointer is relative to `.jj/`; drop `repo` then `.jj` to reach the root.
-    let root = jj_dir.join(&pointer).parent().and_then(Path::parent).map(Path::to_path_buf);
+    let root = jj_dir
+        .join(&pointer)
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
     match root.and_then(|r| fs::canonicalize(r).ok()) {
         Some(canon) => canon.display().to_string(),
         None => workspace.to_string(),
@@ -580,11 +886,17 @@ fn repo_root(workspace: &str) -> String {
 
 fn valid_branch(branch: &str) -> bool {
     !branch.is_empty()
-        && branch.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+        && branch
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
 }
 
 fn basename(path: &str) -> String {
-    Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or("repo").to_string()
+    Path::new(path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("repo")
+        .to_string()
 }
 
 fn config_value(key: &str) -> Option<String> {
@@ -614,7 +926,9 @@ fn config_value(key: &str) -> Option<String> {
 
 fn which(cmd: &str) -> Option<()> {
     let paths = env::var_os("PATH")?;
-    env::split_paths(&paths).find(|dir| dir.join(cmd).is_file()).map(|_| ())
+    env::split_paths(&paths)
+        .find(|dir| dir.join(cmd).is_file())
+        .map(|_| ())
 }
 
 fn prompt(message: &str) -> String {
@@ -629,7 +943,10 @@ fn run_or(cmd: Command, what: &str, on_err: fn(&str) -> !) {
     let mut cmd = cmd;
     match cmd.status() {
         Ok(status) if status.success() => {}
-        Ok(status) => on_err(&format!("{what} failed (exit {})", status.code().unwrap_or(-1))),
+        Ok(status) => on_err(&format!(
+            "{what} failed (exit {})",
+            status.code().unwrap_or(-1)
+        )),
         Err(err) => on_err(&format!("{what} failed to start: {err}")),
     }
 }

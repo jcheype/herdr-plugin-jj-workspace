@@ -24,12 +24,30 @@ title = "New jj workspace (in tab)"
 contexts = ["workspace", "global"]
 command = ["./target/release/jj-workspace", "open", "tab"]
 
+[[actions]]
+id = "open-existing-tab"
+title = "Open jj workspace (in tab)"
+contexts = ["workspace", "global"]
+command = ["./target/release/jj-workspace", "open-existing"]
+
 # Interactive wizard the actions above open (prompts for a name in a pane).
 [[panes]]
 id = "wizard"
 title = "New jj workspace"
 placement = "overlay"
 command = ["./target/release/jj-workspace", "wizard"]
+
+[[panes]]
+id = "remove-picker"
+title = "Remove jj workspace"
+placement = "overlay"
+command = ["./target/release/jj-workspace", "remove-picker"]
+
+[[panes]]
+id = "open-picker"
+title = "Open jj workspace"
+placement = "overlay"
+command = ["./target/release/jj-workspace", "open-picker"]
 
 # Remove the focused jj workspace.
 [[actions]]
