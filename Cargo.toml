@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 ratatui = "0.30"
 crossterm = "0.29"
+shellexpand = "3"
 
 [profile.release]
 opt-level = "z"

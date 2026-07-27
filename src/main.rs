@@ -529,18 +529,9 @@ fn seed() -> u64 {
 /// Checkout root: $JJ_WORKSPACE_ROOT override, else ~/.herdr/workspaces.
 fn workspaces_root() -> PathBuf {
     if let Some(root) = config_value("JJ_WORKSPACE_ROOT") {
-        return PathBuf::from(expand_tilde(root.trim_end_matches('/')));
+        return PathBuf::from(root.trim_end_matches('/'));
     }
-    PathBuf::from(expand_tilde("~/.herdr/workspaces"))
-}
-
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
-    }
-    path.to_string()
+    PathBuf::from(shellexpand::full("~/.herdr/workspaces").unwrap_or_else(|_| "~/.herdr/workspaces".into()).into_owned())
 }
 
 // --- helpers ---------------------------------------------------------------
@@ -599,7 +590,7 @@ fn basename(path: &str) -> String {
 fn config_value(key: &str) -> Option<String> {
     if let Ok(value) = env::var(key) {
         if !value.is_empty() {
-            return Some(value);
+            return Some(shellexpand::full(&value).ok()?.into_owned());
         }
     }
     let dir = env::var("HERDR_PLUGIN_CONFIG_DIR").ok()?;
@@ -613,7 +604,7 @@ fn config_value(key: &str) -> Option<String> {
             if k.trim() == key {
                 let v = v.trim().trim_matches('"').trim_matches('\'');
                 if !v.is_empty() {
-                    return Some(v.to_string());
+                    return Some(shellexpand::full(v).ok()?.into_owned());
                 }
             }
         }
