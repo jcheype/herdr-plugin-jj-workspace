@@ -344,11 +344,11 @@ fn open_tab_layout(workspace_id: &str, cwd: &str, label: &str, is_jj: bool) {
     run_right.args(["pane", "run", &right_pane, &right_command]);
     run_or(run_right, "start right-pane setup", fail);
 
-    // Give checkout materialization a head start, then launch Codex without
+    // Give checkout materialization a head start, then launch pi without
     // changing focus away from the left pane.
-    let mut start_codex = Command::new(&herdr);
-    start_codex.args(["pane", "run", &left_pane, "co"]);
-    run_or(start_codex, "start Codex in left pane", fail);
+    let mut start_agent = Command::new(&herdr);
+    start_agent.args(["pane", "run", &left_pane, "pi"]);
+    run_or(start_agent, "start pi in left pane", fail);
 
     if !is_jj {
         let body = format!(
@@ -409,39 +409,9 @@ fn required_json_string(value: &Value, pointer: &str) -> String {
 
 fn wait_for_codex_and_accept_trust(pane_id: &str, timeout: Duration) -> bool {
     let started = std::time::Instant::now();
-    let mut trust_attempts = 0;
     let mut blocked_without_trust_since: Option<std::time::Instant> = None;
     let mut ready_since: Option<std::time::Instant> = None;
     while started.elapsed() < timeout {
-        let pane_text = read_pane_text(pane_id);
-        let normalized = pane_text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let trust_prompt = normalized.contains("Do you trust the contents of this directory?")
-            && normalized.contains("1. Yes, continue")
-            && normalized.contains("2. No, quit");
-        if trust_prompt {
-            if trust_attempts >= 5 {
-                return false;
-            }
-            let mut accept = Command::new(herdr_bin());
-            accept.args(["pane", "send-keys", pane_id, "enter"]);
-            if !run(accept) {
-                return false;
-            }
-            trust_attempts += 1;
-            blocked_without_trust_since = None;
-            ready_since = None;
-            thread::sleep(Duration::from_millis(200));
-            continue;
-        }
-        if normalized.contains("OpenAI Codex") && normalized.contains("Ask Codex to do anything") {
-            let ready = ready_since.get_or_insert_with(std::time::Instant::now);
-            if ready.elapsed() >= Duration::from_secs(1) {
-                return true;
-            }
-        } else {
-            ready_since = None;
-        }
-
         if let Ok(agents) = herdr_json(&["agent", "list"]) {
             let status = agents
                 .pointer("/result/agents")
@@ -451,11 +421,17 @@ fn wait_for_codex_and_accept_trust(pane_id: &str, timeout: Duration) -> bool {
                         .iter()
                         .find(|agent| {
                             agent.get("pane_id").and_then(Value::as_str) == Some(pane_id)
-                                && agent.get("agent").and_then(Value::as_str) == Some("codex")
+                                && agent.get("agent").and_then(Value::as_str) == Some("pi")
                         })
                         .and_then(|agent| agent.get("agent_status").and_then(Value::as_str))
                 });
             match status {
+                Some("idle") | Some("done") => {
+                    let ready = ready_since.get_or_insert_with(std::time::Instant::now);
+                    if ready.elapsed() >= Duration::from_secs(1) {
+                        return true;
+                    }
+                }
                 Some("blocked") => {
                     let blocked_since =
                         blocked_without_trust_since.get_or_insert_with(std::time::Instant::now);
@@ -463,7 +439,10 @@ fn wait_for_codex_and_accept_trust(pane_id: &str, timeout: Duration) -> bool {
                         return false;
                     }
                 }
-                _ => blocked_without_trust_since = None,
+                _ => {
+                    blocked_without_trust_since = None;
+                    ready_since = None;
+                }
             }
         }
         thread::sleep(Duration::from_millis(100));
@@ -512,9 +491,9 @@ fn cmd_finish_tab(args: &[String]) -> ! {
         toast.args([
             "notification",
             "show",
-            "Codex needs attention",
+            "pi needs attention",
             "--body",
-            "Codex did not clear its startup prompt automatically.",
+            "pi did not start cleanly; open the tab and launch it manually.",
             "--position",
             "top-right",
             "--sound",
